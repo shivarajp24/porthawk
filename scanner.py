@@ -1,6 +1,6 @@
 """
 Core scanning engine for PortHawk.
-Handles TCP connect, SYN-style (raw), UDP, and banner grabbing.
+Handles TCP connect, UDP, banner grabbing, and version detection.
 """
 
 import socket
@@ -15,9 +15,10 @@ from .utils import resolve_host, is_valid_ip
 @dataclass
 class PortResult:
     port: int
-    state: str = "unknown"   # open / closed / filtered
+    state: str = "unknown"
     service: str = ""
     banner: str = ""
+    version: str = ""
     latency_ms: float = 0.0
 
 
@@ -28,10 +29,10 @@ class ScanResult:
     scan_type: str
     start_time: float = field(default_factory=time.time)
     end_time: float = 0.0
-    ports: list[PortResult] = field(default_factory=list)
+    ports: list = field(default_factory=list)
 
     @property
-    def open_ports(self) -> list[PortResult]:
+    def open_ports(self):
         return [p for p in self.ports if p.state == "open"]
 
     @property
@@ -39,8 +40,7 @@ class ScanResult:
         return round(self.end_time - self.start_time, 2)
 
 
-# Common service names (port → service)
-COMMON_SERVICES: dict[int, str] = {
+COMMON_SERVICES: dict = {
     21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP",
     53: "DNS", 80: "HTTP", 110: "POP3", 143: "IMAP",
     443: "HTTPS", 445: "SMB", 3306: "MySQL", 3389: "RDP",
@@ -50,16 +50,13 @@ COMMON_SERVICES: dict[int, str] = {
 
 
 def grab_banner(ip: str, port: int, timeout: float = 2.0) -> str:
-    """Try to grab a banner from an open port."""
     try:
         with socket.create_connection((ip, port), timeout=timeout) as sock:
             sock.settimeout(timeout)
-            # Send HTTP request for web ports, else just read
             if port in (80, 8080, 8000, 8443, 443):
                 sock.sendall(b"HEAD / HTTP/1.0\r\nHost: target\r\n\r\n")
             data = sock.recv(1024)
             banner = data.decode(errors="ignore").strip()
-            # Return first non-empty line
             for line in banner.splitlines():
                 line = line.strip()
                 if line:
@@ -69,16 +66,9 @@ def grab_banner(ip: str, port: int, timeout: float = 2.0) -> str:
     return ""
 
 
-def tcp_connect_scan(
-    ip: str,
-    port: int,
-    timeout: float = 1.0,
-    grab_banners: bool = False,
-) -> PortResult:
-    """Standard TCP connect scan (no root needed)."""
+def tcp_connect_scan(ip, port, timeout=1.0, grab_banners=False, detect_version=False):
     start = time.monotonic()
     result = PortResult(port=port, service=COMMON_SERVICES.get(port, ""))
-
     try:
         with socket.create_connection((ip, port), timeout=timeout):
             latency = (time.monotonic() - start) * 1000
@@ -86,19 +76,17 @@ def tcp_connect_scan(
             result.latency_ms = round(latency, 2)
             if grab_banners:
                 result.banner = grab_banner(ip, port, timeout)
+            if detect_version:
+                from .version import detect_version as dv
+                result.version = dv(ip, port, timeout)
     except ConnectionRefusedError:
         result.state = "closed"
     except (socket.timeout, OSError):
         result.state = "filtered"
-
     return result
 
 
 def udp_scan(ip: str, port: int, timeout: float = 2.0) -> PortResult:
-    """
-    Basic UDP probe.
-    Note: UDP scanning is inherently unreliable without root for ICMP responses.
-    """
     result = PortResult(port=port, service=COMMON_SERVICES.get(port, ""))
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -107,7 +95,7 @@ def udp_scan(ip: str, port: int, timeout: float = 2.0) -> PortResult:
         sock.recvfrom(1024)
         result.state = "open"
     except socket.timeout:
-        result.state = "open|filtered"   # No ICMP = might be open
+        result.state = "open|filtered"
     except ConnectionRefusedError:
         result.state = "closed"
     except Exception:
@@ -118,63 +106,24 @@ def udp_scan(ip: str, port: int, timeout: float = 2.0) -> PortResult:
 
 
 class Scanner:
-    """
-    Multi-threaded port scanner with TCP and UDP support.
-
-    Usage:
-        scanner = Scanner(host="192.168.1.1", ports=range(1, 1025))
-        result = scanner.run()
-    """
-
-    def __init__(
-        self,
-        host: str,
-        ports: list[int] | range,
-        scan_type: str = "tcp",
-        threads: int = 100,
-        timeout: float = 1.0,
-        grab_banners: bool = False,
-    ):
+    def __init__(self, host, ports, scan_type="tcp", threads=100,
+                 timeout=1.0, grab_banners=False, detect_version=False):
         self.host = host
         self.ports = list(ports)
         self.scan_type = scan_type.lower()
-        self.threads = min(threads, 500)   # Safety cap
+        self.threads = min(threads, 500)
         self.timeout = timeout
         self.grab_banners = grab_banners
+        self.detect_version = detect_version
         self._stop_event = threading.Event()
 
-    def _scan_port(self, ip: str, port: int) -> Optional[PortResult]:
+    def _scan_port(self, ip, port):
         if self._stop_event.is_set():
             return None
         if self.scan_type == "udp":
             return udp_scan(ip, port, self.timeout)
-        return tcp_connect_scan(ip, port, self.timeout, self.grab_banners)
+        return tcp_connect_scan(ip, port, self.timeout,
+                                self.grab_banners, self.detect_version)
 
     def run(self, callback=None) -> ScanResult:
-        """
-        Run the scan. Optional callback(port_result) is called for each result.
-        Returns a ScanResult with all findings.
-        """
         ip = resolve_host(self.host)
-        result = ScanResult(host=self.host, ip=ip, scan_type=self.scan_type)
-
-        with ThreadPoolExecutor(max_workers=self.threads) as executor:
-            futures = {
-                executor.submit(self._scan_port, ip, port): port
-                for port in self.ports
-            }
-            for future in as_completed(futures):
-                port_result = future.result()
-                if port_result:
-                    result.ports.append(port_result)
-                    if callback:
-                        callback(port_result)
-
-        # Sort by port number
-        result.ports.sort(key=lambda p: p.port)
-        result.end_time = time.time()
-        return result
-
-    def stop(self):
-        """Signal the scanner to stop gracefully."""
-        self._stop_event.set()

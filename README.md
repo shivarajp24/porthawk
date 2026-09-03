@@ -35,7 +35,7 @@ pip install porthawk
 
 ### From source
 ```bash
-git clone https://github.com/yourusername/porthawk.git
+git clone https://github.com/shivarajp24/porthawk.git
 cd porthawk
 pip install -e .
 ```

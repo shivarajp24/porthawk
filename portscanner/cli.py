@@ -1,6 +1,5 @@
 import argparse
 import sys
-import os
 from . import __version__
 from .scanner import Scanner
 from .utils import parse_ports, expand_cidr, is_valid_ip
@@ -25,20 +24,22 @@ Examples:
   porthawk scanme.nmap.org
   porthawk scanme.nmap.org -p 1-1000 --banner --version
   porthawk scanme.nmap.org --vuln --web-vuln
-  porthawk scanme.nmap.org --dns --whois --geoip
-  porthawk scanme.nmap.org --subdomains
+  porthawk scanme.nmap.org --discover
+  porthawk scanme.nmap.org --brute
+  porthawk scanme.nmap.org --brute --wordlist-user users.txt --wordlist-pass pass.txt
+  porthawk scanme.nmap.org --dns --whois --geoip --subdomains
   porthawk scanme.nmap.org --waf --cdn
   porthawk 192.168.1.1-254 --ping-sweep
   porthawk scanme.nmap.org --tor
   porthawk scanme.nmap.org --evasion sneaky
-  porthawk scanme.nmap.org --vuln --telegram-token TOKEN --telegram-chat CHATID
+  porthawk scanme.nmap.org --vuln --telegram-token TOKEN --telegram-chat ID
   porthawk scanme.nmap.org -o report.html -f html
   porthawk scanme.nmap.org -o report.xml -f xml
   porthawk --plugins
         """
     )
-    # Target
-    parser.add_argument("target", nargs="?", help="IP, hostname, CIDR or IP range")
+
+    parser.add_argument("target", nargs="?")
 
     # Scan
     scan = parser.add_argument_group("Scan")
@@ -49,8 +50,7 @@ Examples:
     scan.add_argument("--banner", action="store_true")
     scan.add_argument("--version", action="store_true", dest="detect_version")
     scan.add_argument("--show-closed", action="store_true", dest="show_closed")
-    scan.add_argument("--random", action="store_true", dest="random_ports",
-                      help="Randomize port scan order")
+    scan.add_argument("--random", action="store_true", dest="random_ports")
 
     # Intel
     intel = parser.add_argument_group("Intelligence")
@@ -66,23 +66,36 @@ Examples:
     intel.add_argument("--emails", action="store_true")
     intel.add_argument("--ping-sweep", action="store_true", dest="ping_sweep")
 
+    # Discovery
+    disc = parser.add_argument_group("Discovery")
+    disc.add_argument("--discover", action="store_true",
+                      help="HTTP title, robots.txt, paths, technologies")
+
     # Vuln
     vuln = parser.add_argument_group("Vulnerability")
     vuln.add_argument("--vuln", action="store_true")
-    vuln.add_argument("--web-vuln", action="store_true", dest="web_vuln",
-                      help="SQLi, XSS, CSRF, Log4Shell, Spring4Shell")
+    vuln.add_argument("--web-vuln", action="store_true", dest="web_vuln")
+
+    # Brute Force
+    brute = parser.add_argument_group("Brute Force")
+    brute.add_argument("--brute", action="store_true",
+                       help="Brute force SSH, FTP, HTTP, MySQL, Redis")
+    brute.add_argument("--wordlist-user", metavar="FILE", dest="wordlist_user",
+                       help="Custom username wordlist file")
+    brute.add_argument("--wordlist-pass", metavar="FILE", dest="wordlist_pass",
+                       help="Custom password wordlist file")
 
     # Evasion
     evasion = parser.add_argument_group("Evasion")
-    evasion.add_argument("--tor", action="store_true", help="Route through Tor")
-    evasion.add_argument("--proxy", metavar="HOST:PORT", help="SOCKS5 proxy")
+    evasion.add_argument("--tor", action="store_true")
+    evasion.add_argument("--proxy", metavar="HOST:PORT")
     evasion.add_argument("--evasion", choices=["normal","slow","sneaky","paranoid"],
-                         default="normal", help="IDS evasion profile")
+                         default="normal")
 
     # Notify
     notify = parser.add_argument_group("Notifications")
     notify.add_argument("--telegram-token", metavar="TOKEN", dest="tg_token")
-    notify.add_argument("--telegram-chat", metavar="CHATID", dest="tg_chat")
+    notify.add_argument("--telegram-chat", metavar="ID", dest="tg_chat")
     notify.add_argument("--email-to", metavar="EMAIL", dest="email_to")
     notify.add_argument("--email-from", metavar="EMAIL", dest="email_from")
     notify.add_argument("--email-pass", metavar="PASS", dest="email_pass")
@@ -90,20 +103,19 @@ Examples:
     notify.add_argument("--smtp-port", metavar="PORT", type=int, default=465, dest="smtp_port")
 
     # Plugins
-    plugins = parser.add_argument_group("Plugins")
-    plugins.add_argument("--plugins", action="store_true", help="Run custom plugins")
+    parser.add_argument("--plugins", action="store_true")
 
     # Output
     out = parser.add_argument_group("Output")
     out.add_argument("-o", "--output", metavar="FILE")
-    out.add_argument("-f", "--format", choices=["text","json","csv","html","xml","pdf"],
+    out.add_argument("-f", "--format",
+                     choices=["text","json","csv","html","xml","pdf"],
                      default="text")
 
     return parser
 
 
 def print_results(result):
-    """Print scan results table."""
     print(colorize(f"\n  {'PORT':<10} {'SERVICE':<14} {'VERSION / BANNER'}", BOLD))
     print("  " + "-" * 55)
     for p in result.open_ports:
@@ -117,7 +129,6 @@ def print_results(result):
 
 
 def print_vuln_results(findings):
-    """Print vulnerability results."""
     if not findings:
         return
     print(colorize(f"\n  {'PORT':<8} {'CHECK':<25} {'RESULT'}", BOLD))
@@ -127,6 +138,14 @@ def print_vuln_results(findings):
         print(f"  {f['port']:<8} {f['name']:<25} {status}")
         print(f"  {'':<8} {colorize(f['detail'][:55], YELLOW)}")
     print()
+
+
+def load_wordlist(path: str) -> list:
+    try:
+        with open(path) as f:
+            return [l.strip() for l in f if l.strip()]
+    except Exception:
+        return []
 
 
 def main():
@@ -140,19 +159,16 @@ def main():
         parser.print_help()
         return
 
-    # Parse ports
     try:
         ports = parse_ports(args.ports)
     except ValueError as e:
         parser.error(str(e))
 
-    # Randomize ports
     if args.random_ports:
         import random
         random.shuffle(ports)
         print(colorize("  [*] Port order randomized\n", CYAN))
 
-    # Expand targets
     if "/" in args.target:
         targets = list(expand_cidr(args.target))
     elif "-" in args.target.split(".")[-1]:
@@ -161,7 +177,6 @@ def main():
     else:
         targets = [args.target]
 
-    # Ping sweep
     if args.ping_sweep:
         from .intel import ping_sweep as ps
         print(colorize(f"  [*] Ping sweep {len(targets)} hosts...\n", CYAN))
@@ -173,27 +188,26 @@ def main():
         if not targets:
             return
 
-    # Check Tor
     if args.tor:
         from .proxy import check_tor_running
         if check_tor_running():
-            print(colorize("  [*] Tor detected — routing through Tor\n", CYAN))
+            print(colorize("  [*] Tor active\n", CYAN))
         else:
-            print(colorize("  [!] Tor not running on port 9050 — install Termux:Tor\n", YELLOW))
+            print(colorize("  [!] Tor not running on 9050\n", YELLOW))
             args.tor = False
 
-    # Rate limiter
     from .proxy import get_limiter, jitter_sleep
     limiter = get_limiter(args.evasion)
     if args.evasion != "normal":
-        print(colorize(f"  [*] Evasion mode: {args.evasion}\n", CYAN))
+        print(colorize(f"  [*] Evasion: {args.evasion}\n", CYAN))
 
-    all_findings = []
+    # Load custom wordlists
+    custom_users = load_wordlist(args.wordlist_user) if args.wordlist_user else None
+    custom_pass  = load_wordlist(args.wordlist_pass) if args.wordlist_pass else None
 
     for target in targets:
         print(f"  Scanning {colorize(target, GREEN)} — {len(ports)} ports [{args.scan_type.upper()}]\n")
 
-        # Scan
         scanner = Scanner(
             host=target, ports=ports, scan_type=args.scan_type,
             threads=args.threads, timeout=args.timeout,
@@ -216,24 +230,21 @@ def main():
         # GeoIP
         if args.geoip:
             from .advanced_scan import geoip_lookup
-            print(colorize("  [*] GeoIP lookup...", CYAN))
+            print(colorize("  [*] GeoIP...", CYAN))
             geo = geoip_lookup(result.ip)
             if "error" not in geo:
                 print(f"      Country : {geo.get('country','')}")
                 print(f"      City    : {geo.get('city','')}")
                 print(f"      ISP     : {geo.get('isp','')}")
-                print(f"      ASN     : {geo.get('asn','')}")
-            else:
-                print(f"      {geo['error']}")
-            print()
+                print(f"      ASN     : {geo.get('asn','')}\n")
 
         # DNS
         if args.dns:
             from .intel import dns_lookup
-            print(colorize("  [*] DNS lookup...", CYAN))
+            print(colorize("  [*] DNS...", CYAN))
             d = dns_lookup(target)
             extra["dns"] = d
-            print(f"      A  : {', '.join(d.get('ips', []))}")
+            print(f"      A  : {', '.join(d.get('ips',[]))}")
             print(f"      PTR: {d.get('reverse','') or '—'}\n")
 
         # WHOIS
@@ -261,7 +272,7 @@ def main():
             from .intel import fetch_http_headers
             for p in result.open_ports:
                 if p.port in (80,443,8080,8443):
-                    print(colorize(f"  [*] HTTP headers port {p.port}...", CYAN))
+                    print(colorize(f"  [*] HTTP headers {p.port}...", CYAN))
                     h = fetch_http_headers(target, p.port)
                     extra["http_headers"] = h
                     print(f"      Status: {h.get('status','')}")
@@ -275,7 +286,7 @@ def main():
             from .version import get_ssl_info
             for p in result.open_ports:
                 if p.port in (443,8443):
-                    print(colorize(f"  [*] SSL port {p.port}...", CYAN))
+                    print(colorize(f"  [*] SSL {p.port}...", CYAN))
                     s = get_ssl_info(target, p.port)
                     extra["ssl"] = s
                     if s:
@@ -309,13 +320,13 @@ def main():
         # Subdomains
         if args.subdomains:
             from .advanced_scan import enumerate_subdomains
-            print(colorize("  [*] Subdomain enumeration...", CYAN))
+            print(colorize("  [*] Subdomains...", CYAN))
             subs = enumerate_subdomains(target)
             if subs:
                 for s in subs:
                     print(f"      {colorize(s['subdomain'], GREEN)} → {s['ip']}")
             else:
-                print("      No subdomains found")
+                print("      None found")
             print()
 
         # Emails
@@ -329,24 +340,47 @@ def main():
                         for e in emails:
                             print(f"      {colorize(e, CYAN)}")
                     else:
-                        print("      No emails found")
+                        print("      None found")
                     print()
                     break
 
-        # Vuln scan
+        # Discovery
+        if args.discover:
+            from .discovery import run_discovery
+            print(colorize("  [*] Discovery scan...\n", CYAN))
+            disc = run_discovery(target, result.ip, result.open_ports)
+            extra["discovery"] = disc
+            print()
+
+        # Vuln
         if args.vuln:
             from .vuln import run_vuln_scan
             print(colorize("  [*] Vulnerability scan...\n", CYAN))
-            findings = run_vuln_scan(target, result.ip, result.open_ports)
-            print_vuln_results(findings)
+            v_findings = run_vuln_scan(target, result.ip, result.open_ports)
+            print_vuln_results(v_findings)
+            findings.extend(v_findings)
 
-        # Web vuln scan
+        # Web Vuln
         if args.web_vuln:
             from .web_vuln import run_web_vuln_scan
             print(colorize("  [*] Web vulnerability scan...\n", CYAN))
-            web_findings = run_web_vuln_scan(target, result.open_ports)
-            print_vuln_results(web_findings)
-            findings.extend(web_findings)
+            w_findings = run_web_vuln_scan(target, result.open_ports)
+            print_vuln_results(w_findings)
+            findings.extend(w_findings)
+
+        # Brute Force
+        if args.brute:
+            from .bruteforce import run_brute_force
+            print(colorize("  [*] Brute force...\n", CYAN))
+            bf = run_brute_force(target, result.ip, result.open_ports,
+                                 custom_users, custom_pass)
+            if bf:
+                print(colorize(f"\n  [!] Credentials found:", RED))
+                for c in bf:
+                    print(colorize(
+                        f"      {c['service']}:{c['port']} "
+                        f"→ {c['username']}:{c['password']}", RED))
+            print()
 
         # Plugins
         if args.plugins:
@@ -354,12 +388,10 @@ def main():
             print(colorize("  [*] Running plugins...\n", CYAN))
             pm = PluginManager()
             pm.load()
-            results = pm.run_all(target, result.ip, result.open_ports)
-            for r in results:
+            presults = pm.run_all(target, result.ip, result.open_ports)
+            for r in presults:
                 print(f"      [{r['plugin']}] {r['result']}")
             print()
-
-        all_findings.extend(findings)
 
         # Save output
         if args.output:
@@ -368,49 +400,50 @@ def main():
                 content = generate_html_report(result, extra)
                 with open(args.output, "w") as f:
                     f.write(content)
-                print(colorize(f"  HTML saved → {args.output}", CYAN))
+                print(colorize(f"  HTML → {args.output}", CYAN))
             elif args.format == "xml":
                 from .notify import to_xml
                 content = to_xml(result, findings)
                 with open(args.output, "w") as f:
                     f.write(content)
-                print(colorize(f"  XML saved → {args.output}", CYAN))
+                print(colorize(f"  XML → {args.output}", CYAN))
             elif args.format == "pdf":
                 from .notify import to_pdf_html
                 content = to_pdf_html(result, findings)
-                path = args.output.replace(".pdf", ".html")
+                path = args.output.replace(".pdf",".html")
                 with open(path, "w") as f:
                     f.write(content)
-                print(colorize(f"  PDF-ready HTML saved → {path} (open in browser → Print → Save as PDF)", CYAN))
+                print(colorize(f"  PDF-ready → {path}", CYAN))
             elif args.format == "json":
                 from .output import to_json
                 with open(args.output, "w") as f:
                     f.write(to_json(result))
-                print(colorize(f"  JSON saved → {args.output}", CYAN))
+                print(colorize(f"  JSON → {args.output}", CYAN))
             elif args.format == "csv":
                 from .output import to_csv
                 with open(args.output, "w") as f:
                     f.write(to_csv(result))
-                print(colorize(f"  CSV saved → {args.output}", CYAN))
+                print(colorize(f"  CSV → {args.output}", CYAN))
 
-        # Telegram notification
+        # Telegram
         if args.tg_token and args.tg_chat:
             from .notify import send_telegram, format_telegram_message
-            print(colorize("  [*] Sending Telegram alert...", CYAN))
+            print(colorize("  [*] Telegram alert...", CYAN))
             msg = format_telegram_message(result, findings)
             ok = send_telegram(args.tg_token, args.tg_chat, msg)
-            print(colorize("  Telegram sent!", GREEN) if ok else colorize("  Telegram failed!", YELLOW))
+            print(colorize("  Sent!", GREEN) if ok else colorize("  Failed!", YELLOW))
             print()
 
-        # Email notification
+        # Email
         if args.email_to and args.email_from and args.email_pass:
             from .notify import send_email, format_email_body
-            print(colorize("  [*] Sending email...", CYAN))
+            print(colorize("  [*] Email alert...", CYAN))
             body = format_email_body(result, findings)
             ok = send_email(args.smtp_host, args.smtp_port,
                            args.email_from, args.email_pass,
-                           args.email_to, f"PortHawk Report — {target}", body)
-            print(colorize("  Email sent!", GREEN) if ok else colorize("  Email failed!", YELLOW))
+                           args.email_to,
+                           f"PortHawk Report — {target}", body)
+            print(colorize("  Sent!", GREEN) if ok else colorize("  Failed!", YELLOW))
             print()
 
         jitter_sleep(args.evasion)

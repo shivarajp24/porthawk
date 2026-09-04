@@ -1,5 +1,10 @@
 # PortHawk 🦅
 
+## PortHawk — Nmap Alternative | Python Port Scanner | Network Security Tool
+
+Keywords: port scanner, nmap alternative, python port scanner, 
+network scanner, vulnerability scanner, open source security tool,
+port scanning tool, ethical hacking tool, penetration testing
 A fast, multi-threaded port scanner written in pure Python — no dependencies required.
 
 ```

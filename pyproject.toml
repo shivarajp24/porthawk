@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "porthawk"
@@ -30,3 +30,7 @@ porthawk = "portscanner.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/shivarajp24/porthawk"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["portscanner*"]

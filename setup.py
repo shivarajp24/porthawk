@@ -5,7 +5,7 @@ with open("README.md", encoding="utf-8") as f:
 
 setup(
     name="porthawk",
-    version="2.0.2",
+    version="2.0.3",
     description="Fast multi-threaded port scanner - Nmap alternative",
     long_description=long_description,
     long_description_content_type="text/markdown",
